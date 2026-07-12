@@ -24,6 +24,7 @@
 #include "IopBios.h"
 #include "MTGS.h"
 #include "MTVU.h"
+#include "Orpheus.h"
 #include "PINE.h"
 #include "Patch.h"
 #include "PerformanceMetrics.h"
@@ -423,6 +424,7 @@ bool VMManager::Internal::CPUThreadInitialize()
 		Achievements::Initialize();
 
 	ReloadPINE();
+	OrpheusServer::Initialize();
 
 	if (EmuConfig.EnableDiscordPresence)
 		InitializeDiscordPresence();
@@ -438,6 +440,7 @@ void VMManager::Internal::CPUThreadShutdown()
 {
 	ShutdownDiscordPresence();
 
+	OrpheusServer::Deinitialize();
 	PINEServer::Deinitialize();
 
 	Achievements::Shutdown(false);
