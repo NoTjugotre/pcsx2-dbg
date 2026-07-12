@@ -18,7 +18,9 @@
 
 #include "Orpheus.h"
 
+#include "DebugTools/Breakpoints.h"
 #include "DebugTools/DebugInterface.h"
+#include "Host.h"
 #include "VMManager.h"
 
 #include "common/Console.h"
@@ -28,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -176,6 +179,134 @@ namespace
 		return o.str();
 	}
 
+	// ---- control / mutation endpoints ----
+	// Mutations run on the CPU thread fire-and-forget (block=false): the server
+	// thread never waits on the CPU thread, so there is no shutdown deadlock.
+	// The effect is observable via the read endpoints (/status, /breakpoints,
+	// /watchpoints).
+	BreakPointCpu bpCpuFromQuery(const std::string& query)
+	{
+		return (query.find("cpu=iop") != std::string::npos) ? BREAKPOINT_IOP : BREAKPOINT_EE;
+	}
+
+	std::string doPauseResume(bool pause)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		Host::RunOnCPUThread([pause]() {
+			if (pause)
+				r5900Debug.pauseCpu();
+			else
+				r5900Debug.resumeCpu();
+		}, false);
+		return "{\"ok\":true}";
+	}
+
+	std::string addBreakpoint(const std::string& query)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		const BreakPointCpu cpu = bpCpuFromQuery(query);
+		const u32 addr = parseU32(queryParam(query, "addr"));
+		if (addr == 0)
+			return "{\"error\":\"addr required\"}";
+		Host::RunOnCPUThread([cpu, addr]() {
+			CBreakPoints::AddBreakPoint(cpu, addr);
+			CBreakPoints::Update(cpu);
+		}, false);
+		return "{\"ok\":true}";
+	}
+
+	std::string removeBreakpoint(const std::string& query)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		const BreakPointCpu cpu = bpCpuFromQuery(query);
+		const u32 addr = parseU32(queryParam(query, "addr"));
+		Host::RunOnCPUThread([cpu, addr]() {
+			CBreakPoints::RemoveBreakPoint(cpu, addr);
+			CBreakPoints::Update(cpu);
+		}, false);
+		return "{\"ok\":true}";
+	}
+
+	std::string listBreakpoints(const std::string& query)
+	{
+		const BreakPointCpu cpu = bpCpuFromQuery(query);
+		const std::vector<BreakPoint> bps = CBreakPoints::GetBreakpoints(cpu, false);
+		std::ostringstream o;
+		o << "[";
+		for (size_t i = 0; i < bps.size(); i++)
+		{
+			if (i)
+				o << ",";
+			o << "{\"addr\":\"" << hex32(bps[i].addr) << "\",\"enabled\":"
+			  << (bps[i].enabled ? "true" : "false") << "}";
+		}
+		o << "]";
+		return o.str();
+	}
+
+	MemCheckCondition memCondFromQuery(const std::string& query)
+	{
+		const std::string c = queryParam(query, "cond");
+		if (c == "r")
+			return MEMCHECK_READ;
+		if (c == "w")
+			return MEMCHECK_WRITE;
+		return MEMCHECK_READWRITE; // default
+	}
+
+	std::string addWatchpoint(const std::string& query)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		const BreakPointCpu cpu = bpCpuFromQuery(query);
+		const u32 start = parseU32(queryParam(query, "start"));
+		u32 end = parseU32(queryParam(query, "end"));
+		if (end <= start)
+			end = start + 1;
+		const MemCheckCondition cond = memCondFromQuery(query);
+		// MEMCHECK_LOG: record accesses (hits, lastPC/addr/size) without breaking.
+		Host::RunOnCPUThread([cpu, start, end, cond]() {
+			CBreakPoints::AddMemCheck(cpu, start, end, cond, MEMCHECK_LOG);
+		}, false);
+		return "{\"ok\":true}";
+	}
+
+	std::string removeWatchpoint(const std::string& query)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		const BreakPointCpu cpu = bpCpuFromQuery(query);
+		const u32 start = parseU32(queryParam(query, "start"));
+		const u32 end = parseU32(queryParam(query, "end"));
+		Host::RunOnCPUThread([cpu, start, end]() {
+			CBreakPoints::RemoveMemCheck(cpu, start, end);
+		}, false);
+		return "{\"ok\":true}";
+	}
+
+	std::string listWatchpoints(const std::string& query)
+	{
+		const BreakPointCpu cpu = bpCpuFromQuery(query);
+		const std::vector<MemCheck> mcs = CBreakPoints::GetMemChecks(cpu);
+		std::ostringstream o;
+		o << "[";
+		for (size_t i = 0; i < mcs.size(); i++)
+		{
+			const MemCheck& m = mcs[i];
+			if (i)
+				o << ",";
+			o << "{\"start\":\"" << hex32(m.start) << "\",\"end\":\"" << hex32(m.end) << "\","
+			  << "\"cond\":" << (int)m.memCond << ",\"hits\":" << m.numHits
+			  << ",\"lastPC\":\"" << hex32(m.lastPC) << "\",\"lastAddr\":\"" << hex32(m.lastAddr)
+			  << "\",\"lastSize\":" << m.lastSize << "}";
+		}
+		o << "]";
+		return o.str();
+	}
+
 	// ---- HTTP ----
 	void sendResponse(int fd, int code, const std::string& body)
 	{
@@ -226,6 +357,22 @@ namespace
 		else if (method == "GET" && path == "/memory")
 			body = jsonMemory(cpuFromQuery(query), parseU32(queryParam(query, "addr")),
 				parseU32(queryParam(query, "len")));
+		else if (method == "POST" && path == "/pause")
+			body = doPauseResume(true);
+		else if (method == "POST" && path == "/resume")
+			body = doPauseResume(false);
+		else if (method == "GET" && path == "/breakpoints")
+			body = listBreakpoints(query);
+		else if (method == "POST" && path == "/breakpoints")
+			body = addBreakpoint(query);
+		else if (method == "DELETE" && path == "/breakpoints")
+			body = removeBreakpoint(query);
+		else if (method == "GET" && path == "/watchpoints")
+			body = listWatchpoints(query);
+		else if (method == "POST" && path == "/watchpoints")
+			body = addWatchpoint(query);
+		else if (method == "DELETE" && path == "/watchpoints")
+			body = removeWatchpoint(query);
 		else
 		{
 			code = 404;
