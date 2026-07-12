@@ -7,6 +7,7 @@
 #include <cstdio>
 #include "R5900.h"
 #include "R3000A.h"
+#include "Orpheus.h"
 
 std::vector<BreakPoint> CBreakPoints::breakPoints_;
 u32 CBreakPoints::breakSkipFirstAtEE_ = 0;
@@ -51,6 +52,8 @@ MemCheck::MemCheck()
 
 void MemCheck::Log(u32 addr, bool write, int size, u32 pc)
 {
+	// Feed the Orpheus /trace ring buffer with every watched access.
+	OrpheusServer::RecordMemAccess((int)cpu, pc, addr, size, write);
 }
 
 void MemCheck::Action(u32 addr, bool write, int size, u32 pc)

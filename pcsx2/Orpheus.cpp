@@ -30,7 +30,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -50,6 +52,7 @@ namespace OrpheusServer
 		return false;
 	}
 	void Deinitialize() {}
+	void RecordMemAccess(int, unsigned int, unsigned int, int, bool) {}
 } // namespace OrpheusServer
 
 #else
@@ -67,6 +70,23 @@ namespace
 	std::thread s_thread;
 	int s_listen_fd = -1;
 	int s_port = 0;
+
+	// ---- memory-access trace ring buffer ----
+	// Fed from the recompiler thread (MemCheck::Log via RecordMemAccess), drained
+	// from the HTTP server thread by GET /trace. Bounded: on overflow the oldest
+	// record is dropped and counted.
+	struct Access
+	{
+		u32 pc;
+		u32 addr;
+		u16 size;
+		u8 write;
+		u8 cpu; // BreakPointCpu (1=EE, 2=IOP)
+	};
+	constexpr size_t TRACE_CAP = 200000;
+	std::mutex s_trace_mtx;
+	std::deque<Access> s_trace;
+	u64 s_trace_dropped = 0;
 
 	// ---- formatting helpers ----
 	std::string hex32(u32 v)
@@ -307,6 +327,33 @@ namespace
 		return o.str();
 	}
 
+	// GET /trace: drain the accumulated memory accesses (and clear the buffer).
+	std::string jsonTrace()
+	{
+		std::deque<Access> batch;
+		u64 dropped;
+		{
+			std::lock_guard<std::mutex> lock(s_trace_mtx);
+			batch.swap(s_trace);
+			dropped = s_trace_dropped;
+			s_trace_dropped = 0;
+		}
+		std::ostringstream o;
+		o << "{\"dropped\":" << dropped << ",\"count\":" << batch.size() << ",\"accesses\":[";
+		bool first = true;
+		for (const Access& a : batch)
+		{
+			if (!first)
+				o << ",";
+			first = false;
+			o << "{\"cpu\":\"" << (a.cpu == BREAKPOINT_IOP ? "iop" : "ee") << "\","
+			  << "\"pc\":\"" << hex32(a.pc) << "\",\"addr\":\"" << hex32(a.addr) << "\","
+			  << "\"size\":" << (int)a.size << ",\"write\":" << (a.write ? "true" : "false") << "}";
+		}
+		o << "]}";
+		return o.str();
+	}
+
 	// ---- HTTP ----
 	void sendResponse(int fd, int code, const std::string& body)
 	{
@@ -373,6 +420,8 @@ namespace
 			body = addWatchpoint(query);
 		else if (method == "DELETE" && path == "/watchpoints")
 			body = removeWatchpoint(query);
+		else if (method == "GET" && path == "/trace")
+			body = jsonTrace();
 		else
 		{
 			code = 404;
@@ -466,6 +515,18 @@ namespace OrpheusServer
 		}
 		if (s_thread.joinable())
 			s_thread.join();
+	}
+
+	// Called from the recompiler thread on every watched memory access.
+	void RecordMemAccess(int cpu, unsigned int pc, unsigned int addr, int size, bool write)
+	{
+		std::lock_guard<std::mutex> lock(s_trace_mtx);
+		if (s_trace.size() >= TRACE_CAP)
+		{
+			s_trace.pop_front();
+			s_trace_dropped++;
+		}
+		s_trace.push_back(Access{pc, addr, (u16)size, (u8)(write ? 1 : 0), (u8)cpu});
 	}
 } // namespace OrpheusServer
 

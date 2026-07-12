@@ -18,4 +18,9 @@ namespace OrpheusServer
 
 	bool Initialize(int port = ORPHEUS_DEFAULT_PORT);
 	void Deinitialize();
+
+	// Called by the debugger memcheck path (MemCheck::Log) on every watched
+	// memory access, to feed the /trace ring buffer. cpu is a BreakPointCpu value
+	// (1 = EE, 2 = IOP).
+	void RecordMemAccess(int cpu, unsigned int pc, unsigned int addr, int size, bool write);
 } // namespace OrpheusServer
