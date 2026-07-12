@@ -287,9 +287,14 @@ namespace
 		if (end <= start)
 			end = start + 1;
 		const MemCheckCondition cond = memCondFromQuery(query);
-		// MEMCHECK_LOG: record accesses (hits, lastPC/addr/size) without breaking.
+		// BREAK makes the recompiler emit the memcheck handler; LOG makes that
+		// handler record the accessor and continue instead of pausing (see the
+		// dynarecMemcheck patch). NOTE: reliable for one trace watchpoint at a
+		// time (the handler returns, so multiple in-range checks would need
+		// register preservation in recMemcheck).
 		Host::RunOnCPUThread([cpu, start, end, cond]() {
-			CBreakPoints::AddMemCheck(cpu, start, end, cond, MEMCHECK_LOG);
+			CBreakPoints::AddMemCheck(cpu, start, end, cond,
+				(MemCheckResult)(MEMCHECK_BREAK | MEMCHECK_LOG));
 		}, false);
 		return "{\"ok\":true}";
 	}

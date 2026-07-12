@@ -5,6 +5,7 @@
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
 #include "Elfheader.h"
+#include "Orpheus.h"
 #include "GS.h"
 #include "Host.h"
 #include "Memory.h"
@@ -1580,10 +1581,14 @@ void dynarecMemcheck(size_t i)
 
 	if (mc.result & MEMCHECK_LOG)
 	{
-		if (opcode.flags & IS_STORE)
-			DevCon.WriteLn("Hit store breakpoint @0x%x", cpuRegs.pc);
-		else
-			DevCon.WriteLn("Hit load breakpoint @0x%x", cpuRegs.pc);
+		// Orpheus "catch the accessor": record the accessing instruction and the
+		// effective address, then continue (do NOT pause) so an external tool gets
+		// a runtime access trace at emulation speed. Effective address = base GPR
+		// + sign-extended offset, as the recompiler itself computes it.
+		const bool store = (opcode.flags & IS_STORE) != 0;
+		const u32 accessAddr = cpuRegs.GPR.r[(op >> 21) & 0x1F].UL[0] + static_cast<s16>(op);
+		OrpheusServer::RecordMemAccess(BREAKPOINT_EE, cpuRegs.pc, accessAddr, 0, store);
+		return;
 	}
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
