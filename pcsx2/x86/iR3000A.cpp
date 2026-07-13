@@ -4,6 +4,7 @@
 #include "iR3000A.h"
 #include "Host.h"
 #include "R3000A.h"
+#include "Orpheus.h"
 #include "BaseblockEx.h"
 #include "R5900OpcodeTables.h"
 #include "IopBios.h"
@@ -1383,10 +1384,12 @@ static bool psxDynarecMemcheck(size_t i)
 
 	if (mc.result & MEMCHECK_LOG)
 	{
-		if (opcode.flags & IS_STORE)
-			DevCon.WriteLn("Hit R3000 store breakpoint @0x%x", pc);
-		else
-			DevCon.WriteLn("Hit R3000 load breakpoint @0x%x", pc);
+		// Orpheus "catch the accessor" (IOP): record the accessing instruction and
+		// effective address, then continue (return false) instead of pausing.
+		const bool store = (opcode.flags & IS_STORE) != 0;
+		const u32 accessAddr = psxRegs.GPR.r[(op >> 21) & 0x1F] + static_cast<u32>(static_cast<s16>(op));
+		OrpheusServer::RecordMemAccess(BREAKPOINT_IOP, pc, accessAddr, 0, store);
+		return false;
 	}
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_IOP);
