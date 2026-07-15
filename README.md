@@ -36,8 +36,9 @@ Use cases this was built for:
 
 The API was designed as the dynamic-analysis backend of
 [Orpheus](https://github.com/NoTjugotre/Orpheus), a Go CLI
-disassembler/decompiler pipeline for PS2 binaries, but it is deliberately
-generic and tool-agnostic.
+disassembler/decompiler pipeline for PS2 binaries (developed privately for
+now, until it reaches a sufficient level of quality), but the API is
+deliberately generic and tool-agnostic.
 
 ## The HTTP API
 
@@ -150,7 +151,8 @@ $ curl -s -X DELETE 'http://127.0.0.1:28052/watchpoints?cpu=ee&start=0x004a55c0'
 
 - **[Orpheus](https://github.com/NoTjugotre/Orpheus)** — Go CLI
   disassembler/decompiler for PS2 binaries; this API is its dynamic-analysis
-  backend.
+  backend. Currently developed privately; the repository will open up once it
+  reaches a sufficient level of quality.
 - **[Eurydice](https://github.com/NoTjugotre/Eurydice)** — Ghidra Debugger
   connector for PCSX2: a TraceRMI agent bridging this HTTP API into Ghidra's
   Debugger UI. A useful reference implementation of a client.
