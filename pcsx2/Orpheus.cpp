@@ -12,14 +12,18 @@
 //   GET /memory?cpu=ee|iop&addr=&len=    hex bytes of a memory range
 //
 // Reads are performed directly (PINE-style), which is racy against a running
-// core but crash- and deadlock-free. Mutating/control endpoints (breakpoints,
-// watchpoints, pause/resume/step) will marshal onto the CPU thread via
-// Host::RunOnCPUThread in a later increment.
+// core but crash- and deadlock-free. Control endpoints (pause/resume, /step,
+// breakpoints, watchpoints) marshal their mutations onto the CPU thread via
+// Host::RunOnCPUThread fire-and-forget; /step additionally computes its stop
+// address up front while the CPU is paused.
 
 #include "Orpheus.h"
 
+#include "DebugTools/BiosDebugData.h"
 #include "DebugTools/Breakpoints.h"
 #include "DebugTools/DebugInterface.h"
+#include "DebugTools/MIPSAnalyst.h"
+#include "DebugTools/MipsStackWalk.h"
 #include "Host.h"
 #include "VMManager.h"
 
@@ -222,6 +226,74 @@ namespace
 		return "{\"ok\":true}";
 	}
 
+	// POST /step?cpu=ee|iop&type=into|over|out — single-step the paused CPU.
+	// Mirrors DebuggerWindow::onStepInto/Over/Out: compute the stop address
+	// branch-aware while paused (conditions are evaluated against the current
+	// register state), then set a temporary stepping breakpoint and resume.
+	std::string doStep(const std::string& query)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		DebugInterface* cpu = cpuFromQuery(query);
+		const BreakPointCpu bpcpu = bpCpuFromQuery(query);
+		const std::string type = queryParam(query, "type");
+		if (!cpu->isAlive() || !cpu->isCpuPaused())
+			return "{\"error\":\"cpu not paused\"}";
+
+		const u32 pc = cpu->getPC();
+		u32 bpAddr = pc + 4; // default: next instruction
+
+		if (type == "out")
+		{
+			std::vector<MipsStackWalk::StackFrame> frames;
+			for (const auto& thread : cpu->GetThreadList())
+			{
+				if (thread->Status() == ThreadStatus::THS_RUN)
+				{
+					frames = MipsStackWalk::Walk(cpu, pc, cpu->getRegister(0, 31),
+						cpu->getRegister(0, 29), thread->EntryPoint());
+					break;
+				}
+			}
+			if (frames.size() < 2)
+				return "{\"error\":\"no caller frame\"}";
+			bpAddr = frames.at(1).pc;
+			CBreakPoints::SetSkipFirst(bpcpu, pc);
+		}
+		else if (type == "over")
+		{
+			const MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(cpu, pc);
+			if (info.isBranch)
+			{
+				if (!info.isConditional)
+					bpAddr = info.isLinkedBranch ? pc + 8 // call: run it, stop after the delay slot
+					                             : info.branchTarget;
+				else
+					bpAddr = info.conditionMet ? info.branchTarget : pc + (2 * 4);
+			}
+		}
+		else // "into" (default)
+		{
+			const MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(cpu, pc);
+			if (info.isBranch)
+			{
+				if (!info.isConditional)
+					bpAddr = info.branchTarget;
+				else
+					bpAddr = info.conditionMet ? info.branchTarget : pc + (2 * 4);
+			}
+			if (info.isSyscall)
+				bpAddr = info.branchTarget; // syscalls are always taken
+			CBreakPoints::SetSkipFirst(bpcpu, pc);
+		}
+
+		Host::RunOnCPUThread([bpcpu, bpAddr, cpu]() {
+			CBreakPoints::AddBreakPoint(bpcpu, bpAddr, true, true, true);
+			cpu->resumeCpu();
+		}, false);
+		return "{\"ok\":true}";
+	}
+
 	std::string addBreakpoint(const std::string& query)
 	{
 		if (!VMManager::HasValidVM())
@@ -413,6 +485,8 @@ namespace
 			body = doPauseResume(true);
 		else if (method == "POST" && path == "/resume")
 			body = doPauseResume(false);
+		else if (method == "POST" && path == "/step")
+			body = doStep(query);
 		else if (method == "GET" && path == "/breakpoints")
 			body = listBreakpoints(query);
 		else if (method == "POST" && path == "/breakpoints")
