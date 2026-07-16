@@ -10,6 +10,11 @@ Everything else is unmodified upstream PCSX2; see the
 [upstream README](https://github.com/PCSX2/pcsx2#readme) for general
 information about the emulator itself.
 
+> **Platform note:** the debugger API is POSIX-socket based and currently
+> **only tested on macOS**. Linux should work but is unverified. On
+> **Windows the API is not available** — a stub keeps the build working,
+> the server just doesn't start (Winsock support is planned, see below).
+
 ## Why
 
 PCSX2's built-in debugger is interactive and GUI-bound, and the existing PINE
@@ -143,9 +148,11 @@ $ curl -s -X DELETE 'http://127.0.0.1:28052/watchpoints?cpu=ee&start=0x004a55c0'
   EE/IOP recompiler memcheck handlers (`dynarecMemcheck` /
   `psxDynarecMemcheck`) feed `OrpheusServer::RecordMemAccess` and continue
   instead of pausing.
-- **Platform support:** POSIX only (Linux/macOS) for now. On Windows the
-  server is stubbed out and logs a warning; the rest of the emulator builds
-  and runs normally.
+- **Platform support:** the socket code is POSIX only for now. Tested on
+  macOS exclusively; Linux is expected to work but hasn't been verified. On
+  Windows the server is stubbed out and logs a warning — the rest of the
+  emulator builds and runs normally, but there is no debugger API. PINE-style
+  Winsock support is on the roadmap.
 
 ## Related projects
 
