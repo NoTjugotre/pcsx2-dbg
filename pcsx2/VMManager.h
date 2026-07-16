@@ -110,6 +110,9 @@ namespace VMManager
 	/// Returns the path to the ELF which is currently running. Only safe to read on the EE thread.
 	const std::string& GetCurrentELF();
 
+	/// Returns the (vaddr, size) of the text segment of the ELF which is currently running.
+	std::pair<u32, u32> GetELFTextRange();
+
 	/// Initializes all system components. May restart itself asynchronously
 	/// using the provided hardcore_disable_callback function. Will call the
 	/// done_callback function on either success or failure.

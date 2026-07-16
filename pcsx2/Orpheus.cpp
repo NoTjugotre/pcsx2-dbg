@@ -99,6 +99,21 @@ namespace
 		std::snprintf(b, sizeof(b), "0x%08x", v);
 		return b;
 	}
+	std::string jsonEscape(const std::string& s)
+	{
+		std::string out;
+		out.reserve(s.size());
+		for (const char c : s)
+		{
+			if (c == '"' || c == '\\')
+				out += '\\';
+			if ((unsigned char)c < 0x20)
+				continue; // control chars have no business in these fields
+			out += c;
+		}
+		return out;
+	}
+
 	std::string hex128(const u128& v)
 	{
 		char b[35];
@@ -139,10 +154,19 @@ namespace
 		o << "{\"vm\":" << (vm ? "true" : "false");
 		if (vm)
 		{
+			const auto [text_start, text_size] = VMManager::GetELFTextRange();
+			std::string elf = VMManager::GetCurrentELF();
+			const size_t slash = elf.find_last_of("/\\");
+			if (slash != std::string::npos)
+				elf = elf.substr(slash + 1);
 			o << ",\"paused\":" << (r5900Debug.isCpuPaused() ? "true" : "false")
 			  << ",\"ee_pc\":\"" << hex32(r5900Debug.getPC()) << "\""
 			  << ",\"iop_pc\":\"" << hex32(r3000Debug.getPC()) << "\""
-			  << ",\"ee_cycles\":" << r5900Debug.getCycles();
+			  << ",\"ee_cycles\":" << r5900Debug.getCycles()
+			  << ",\"serial\":\"" << jsonEscape(VMManager::GetDiscSerial()) << "\""
+			  << ",\"elf\":\"" << jsonEscape(elf) << "\""
+			  << ",\"elf_text_start\":\"" << hex32(text_start) << "\""
+			  << ",\"elf_text_size\":" << text_size;
 		}
 		o << "}";
 		return o.str();
@@ -224,6 +248,39 @@ namespace
 				r5900Debug.resumeCpu();
 		}, false);
 		return "{\"ok\":true}";
+	}
+
+	// GET /callstack?cpu=ee|iop — walk the current thread's call stack
+	// (MipsStackWalk, same as the Qt debugger's stack window). Sensible only
+	// while paused; a walk against a running core returns racy-but-harmless
+	// data.
+	std::string jsonCallstack(DebugInterface* cpu)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		std::vector<MipsStackWalk::StackFrame> frames;
+		for (const auto& thread : cpu->GetThreadList())
+		{
+			if (thread->Status() == ThreadStatus::THS_RUN)
+			{
+				frames = MipsStackWalk::Walk(cpu, cpu->getPC(), cpu->getRegister(0, 31),
+					cpu->getRegister(0, 29), thread->EntryPoint());
+				break;
+			}
+		}
+		std::ostringstream o;
+		o << "{\"frames\":[";
+		for (size_t i = 0; i < frames.size(); i++)
+		{
+			if (i)
+				o << ",";
+			o << "{\"pc\":\"" << hex32(frames[i].pc) << "\""
+			  << ",\"entry\":\"" << hex32(frames[i].entry) << "\""
+			  << ",\"sp\":\"" << hex32(frames[i].sp) << "\""
+			  << ",\"stack_size\":" << frames[i].stackSize << "}";
+		}
+		o << "]}";
+		return o.str();
 	}
 
 	// POST /step?cpu=ee|iop&type=into|over|out — single-step the paused CPU.
@@ -499,6 +556,8 @@ namespace
 			body = addWatchpoint(query);
 		else if (method == "DELETE" && path == "/watchpoints")
 			body = removeWatchpoint(query);
+		else if (method == "GET" && path == "/callstack")
+			body = jsonCallstack(cpuFromQuery(query));
 		else if (method == "GET" && path == "/trace")
 			body = jsonTrace();
 		else

@@ -377,6 +377,11 @@ const std::string& VMManager::GetCurrentELF()
 	return s_elf_path;
 }
 
+std::pair<u32, u32> VMManager::GetELFTextRange()
+{
+	return s_elf_text_range;
+}
+
 bool VMManager::Internal::CPUThreadInitialize()
 {
 	Threading::SetNameOfCurrentThread("CPU Thread");
