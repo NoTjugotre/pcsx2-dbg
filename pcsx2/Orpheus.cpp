@@ -7,9 +7,10 @@
 // that bridges external tools to PCSX2's debugger core. This first increment
 // exposes read-only endpoints:
 //
-//   GET /status                          emulator/VM state
-//   GET /registers?cpu=ee|iop            full register dump
-//   GET /memory?cpu=ee|iop&addr=&len=    hex bytes of a memory range
+//   GET  /status                          emulator/VM state (serial, CRC, ELF)
+//   GET  /registers?cpu=ee|iop            full register dump
+//   GET  /memory?cpu=ee|iop&addr=&len=    hex bytes of a memory range
+//   POST /memory?cpu=ee|iop&addr=&hex=    write hex bytes (pokes/freezes)
 //
 // Reads are performed directly (PINE-style), which is racy against a running
 // core but crash- and deadlock-free. Control endpoints (pause/resume, /step,
@@ -99,6 +100,13 @@ namespace
 		std::snprintf(b, sizeof(b), "0x%08x", v);
 		return b;
 	}
+	// Game CRC as bare uppercase hex, matching PCSX2's pnach naming (no 0x).
+	std::string crc32bare(u32 v)
+	{
+		char b[9];
+		std::snprintf(b, sizeof(b), "%08X", v);
+		return b;
+	}
 	std::string jsonEscape(const std::string& s)
 	{
 		std::string out;
@@ -164,6 +172,7 @@ namespace
 			  << ",\"iop_pc\":\"" << hex32(r3000Debug.getPC()) << "\""
 			  << ",\"ee_cycles\":" << r5900Debug.getCycles()
 			  << ",\"serial\":\"" << jsonEscape(VMManager::GetDiscSerial()) << "\""
+			  << ",\"crc\":\"" << crc32bare(VMManager::GetDiscCRC()) << "\""
 			  << ",\"elf\":\"" << jsonEscape(elf) << "\""
 			  << ",\"elf_text_start\":\"" << hex32(text_start) << "\""
 			  << ",\"elf_text_size\":" << text_size;
@@ -225,6 +234,39 @@ namespace
 		o << "{\"addr\":\"" << hex32(addr) << "\",\"len\":" << len
 		  << ",\"ok\":" << (ok ? "true" : "false") << ",\"hex\":\"" << hx << "\"}";
 		return o.str();
+	}
+
+	// POST /memory?cpu=ee|iop&addr=&hex= — write hex-encoded bytes. Direct
+	// write like the reads (PINE-style, vtlb_memSafe*), so it is safe against
+	// a running core. Sized for pokes/freezes, not bulk uploads; writes into
+	// code regions do not flush the recompiler cache.
+	std::string writeMemory(DebugInterface* cpu, u32 addr, const std::string& hx)
+	{
+		if (!VMManager::HasValidVM())
+			return "{\"error\":\"no vm\"}";
+		constexpr size_t maxBytes = 4096;
+		if (hx.empty() || (hx.size() % 2) != 0 || hx.size() > 2 * maxBytes)
+			return "{\"error\":\"hex must encode 1..4096 bytes\"}";
+		const auto nyb = [](char c) -> int {
+			if (c >= '0' && c <= '9')
+				return c - '0';
+			if (c >= 'a' && c <= 'f')
+				return c - 'a' + 10;
+			if (c >= 'A' && c <= 'F')
+				return c - 'A' + 10;
+			return -1;
+		};
+		std::vector<u8> buf(hx.size() / 2);
+		for (size_t i = 0; i < buf.size(); i++)
+		{
+			const int hi = nyb(hx[2 * i]), lo = nyb(hx[2 * i + 1]);
+			if (hi < 0 || lo < 0)
+				return "{\"error\":\"invalid hex\"}";
+			buf[i] = (u8)((hi << 4) | lo);
+		}
+		if (!cpu->WriteBytes(addr, buf.data(), (u32)buf.size()))
+			return "{\"error\":\"address not writable\"}";
+		return "{\"ok\":true}";
 	}
 
 	// ---- control / mutation endpoints ----
@@ -538,6 +580,9 @@ namespace
 		else if (method == "GET" && path == "/memory")
 			body = jsonMemory(cpuFromQuery(query), parseU32(queryParam(query, "addr")),
 				parseU32(queryParam(query, "len")));
+		else if (method == "POST" && path == "/memory")
+			body = writeMemory(cpuFromQuery(query), parseU32(queryParam(query, "addr")),
+				queryParam(query, "hex"));
 		else if (method == "POST" && path == "/pause")
 			body = doPauseResume(true);
 		else if (method == "POST" && path == "/resume")
